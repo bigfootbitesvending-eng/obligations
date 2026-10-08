@@ -272,4 +272,504 @@
   <a class="back-link" href="/">&larr; Operator Tools</a>
   <header>
     <h1>Non-Tax Obligations</h1>
-    <div class="subtitle">Set-asides for fees, revenue share, financed machines and annual bills. Everything here feeds the Saturday set-aside
+    <div class="subtitle">Set-asides for fees, revenue share, financed machines and annual bills. Everything here feeds the Saturday set-aside email.</div>
+  </header>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Obligations</h2>
+      <button class="btn-primary" id="toggle-add" type="button">+ Add obligation</button>
+    </div>
+
+    <form id="obl-form" novalidate>
+      <h3 id="form-title">Add obligation</h3>
+      <div class="span2">
+        <label for="f-location">Location</label>
+        <select id="f-location"></select>
+      </div>
+      <div class="span2">
+        <label for="f-title">Title</label>
+        <input id="f-title" type="text" placeholder="ADM subscription fee" required>
+      </div>
+      <div class="span2">
+        <label for="f-payee">Payee</label>
+        <input id="f-payee" type="text" placeholder="ADM">
+      </div>
+      <div class="span6">
+        <label for="f-description">Description</label>
+        <input id="f-description" type="text" placeholder="Optional note shown in the email">
+      </div>
+      <div class="span2">
+        <label for="f-kind">Kind</label>
+        <select id="f-kind">
+          <option value="fixed">Fixed amount</option>
+          <option value="variable">% of sales</option>
+        </select>
+      </div>
+
+      <div class="span2 fixed-field">
+        <label for="f-amount">Amount ($)</label>
+        <input id="f-amount" class="num-input" type="number" step="0.01" min="0" placeholder="1200.00">
+      </div>
+      <div class="span2 fixed-field">
+        <label for="f-per">Per</label>
+        <select id="f-per">
+          <option value="week">Week</option>
+          <option value="month" selected>Month</option>
+          <option value="quarter">Quarter</option>
+          <option value="year">Year</option>
+        </select>
+      </div>
+
+      <div class="span2 variable-field hidden">
+        <label for="f-rate">Rate (%)</label>
+        <input id="f-rate" class="num-input" type="number" step="0.0001" min="0" max="100" placeholder="5">
+      </div>
+      <div class="span2 variable-field hidden">
+        <label for="f-basis">Sales basis</label>
+        <select id="f-basis">
+          <option value="gross">Gross sales</option>
+          <option value="net_of_tax">Net of sales tax</option>
+        </select>
+      </div>
+      <div class="span2 variable-field hidden">
+        <label for="f-devices">Devices</label>
+        <input id="f-devices" class="num-input" type="number" step="1" min="1" value="1">
+      </div>
+      <div class="span2 variable-field hidden">
+        <label for="f-min">Min per device/mo ($)</label>
+        <input id="f-min" class="num-input" type="number" step="0.01" min="0" placeholder="Optional">
+      </div>
+      <div class="span2 variable-field hidden">
+        <label for="f-max">Max per device/mo ($)</label>
+        <input id="f-max" class="num-input" type="number" step="0.01" min="0" placeholder="Optional">
+      </div>
+
+      <div class="checkbox-row span2">
+        <input id="f-active" type="checkbox" checked>
+        <label for="f-active" style="margin-bottom:0;text-transform:none;letter-spacing:0;font-size:0.85rem;">Active</label>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn-primary">Save</button>
+        <button type="button" class="btn-quiet" id="cancel-form">Cancel</button>
+      </div>
+    </form>
+
+    <table id="obligations-table" style="display:none;">
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>Terms</th>
+          <th class="num" id="window-head">Last 7 days</th>
+          <th style="text-align:center;">Active</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="obligations-body"></tbody>
+    </table>
+
+    <div class="grand-total" id="grand-total"><span>All active non-tax obligations</span><span class="amt" id="grand-total-amt"></span></div>
+    <div class="grand-total-note" id="grand-total-note" style="display:none;"></div>
+
+    <div class="empty-state" id="empty-state" style="display:none;">
+      <strong>No obligations yet</strong>
+      Add the first one above. Pick a location, or Business-wide for items that aren't tied to one.
+    </div>
+  </section>
+
+  <div id="status-line"></div>
+</main>
+
+<script src="/shared/config.js"></script>
+<script>
+  // Single endpoint for everything: GET to read, POST with an
+  // `operation` field ('create' | 'update' | 'delete') for all writes.
+  // Backed by the "Non-Tax Obligations — CRUD API" n8n workflow.
+  const API_BASE = 'https://randysmith42.app.n8n.cloud/webhook/non-tax-obligations';
+  const LOCATIONS_API_BASE = 'https://randysmith42.app.n8n.cloud/webhook/locations';
+
+  const PER_LABELS = { week: 'week', month: 'month', quarter: 'quarter', year: 'year' };
+
+  let LOCATIONS = [];   // [{ location, display_name }]
+  let obligations = [];
+  let editingId = null;
+
+  const tableEl = document.getElementById('obligations-table');
+  const bodyEl = document.getElementById('obligations-body');
+  const emptyEl = document.getElementById('empty-state');
+  const statusEl = document.getElementById('status-line');
+  const form = document.getElementById('obl-form');
+  const $ = (id) => document.getElementById(id);
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message || '';
+    statusEl.className = isError ? 'error' : '';
+  }
+
+  const moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+  function money(v) { return moneyFmt.format(Number(v) || 0); }
+
+  function pct(rate) {
+    return String(parseFloat((Number(rate) * 100).toFixed(4))) + '%';
+  }
+
+  function shortDate(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+    if (!m) return '';
+    const names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return names[Number(m[2]) - 1] + ' ' + Number(m[3]);
+  }
+
+  async function readError(res) {
+    try {
+      const body = await res.json();
+      if (body && body.error) return String(body.error);
+    } catch (e) { /* not JSON */ }
+    return 'Server returned ' + res.status;
+  }
+
+  async function loadObligations() {
+    setStatus('Loading…');
+    try {
+      const res = await fetch(API_BASE, { method: 'GET', headers: { 'X-API-Key': API_KEY } });
+      if (!res.ok) throw new Error(await readError(res));
+      const data = await res.json();
+      obligations = Array.isArray(data) ? data.filter(r => r && r.id !== null && r.id !== undefined) : [];
+      render();
+      setStatus('');
+    } catch (err) {
+      setStatus('Could not load obligations — ' + err.message, true);
+    }
+  }
+
+  async function writeObligation(payload) {
+    const res = await fetch(API_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) throw new Error(await readError(res));
+    return res.json();
+  }
+
+  function termsText(row) {
+    if (row.kind === 'fixed') {
+      return money(row.amount) + ' per ' + (PER_LABELS[row.per] || row.per);
+    }
+    let t = pct(row.rate) + ' of ' + (row.basis === 'net_of_tax' ? 'sales net of tax' : 'gross sales');
+    const hasMin = row.min_monthly !== null && row.min_monthly !== undefined;
+    const hasMax = row.max_monthly !== null && row.max_monthly !== undefined;
+    if (hasMin || hasMax) {
+      const parts = [];
+      if (hasMin) parts.push('min ' + money(row.min_monthly));
+      if (hasMax) parts.push('max ' + money(row.max_monthly));
+      t += ' · ' + parts.join(', ') + ' per device/mo';
+    }
+    if (Number(row.device_count) > 1) t += ' · ' + row.device_count + ' devices';
+    return t;
+  }
+
+  function td(label, text, cls) {
+    const cell = document.createElement('td');
+    cell.dataset.label = label;
+    if (cls) cell.className = cls;
+    cell.textContent = text;
+    return cell;
+  }
+
+  function groupLabel(row) { return row.display_name || row.location || 'Business-wide'; }
+
+  function render() {
+    if (!obligations.length) {
+      tableEl.style.display = 'none';
+      emptyEl.style.display = 'block';
+      $('grand-total').style.display = 'none';
+      $('grand-total-note').style.display = 'none';
+      return;
+    }
+    tableEl.style.display = 'table';
+    emptyEl.style.display = 'none';
+    bodyEl.innerHTML = '';
+
+    const first = obligations[0];
+    const rangeText = first.window_start ? shortDate(first.window_start) + ' – ' + shortDate(first.window_end) : '';
+    $('window-head').textContent = 'Last 7 days' + (rangeText ? ' (' + rangeText + ')' : '');
+
+    let lastGroup = null;
+    let groupTotal = 0;
+    let grandTotal = 0;
+
+    obligations.forEach((row, index) => {
+      const group = groupLabel(row);
+      const tr = document.createElement('tr');
+      if (group !== lastGroup) {
+        if (lastGroup !== null) bodyEl.appendChild(subtotalRow(lastGroup, groupTotal));
+        tr.classList.add('location-start');
+        lastGroup = group;
+        groupTotal = 0;
+      }
+      if (row.active) { groupTotal += Number(row.window_setaside) || 0; grandTotal += Number(row.window_setaside) || 0; }
+      if (!row.active) tr.classList.add('inactive-row');
+      if (editingId === row.id) tr.classList.add('editing');
+
+      const itemTd = td('Item', '', 'item');
+      const title = document.createElement('span');
+      title.className = 'title';
+      title.textContent = row.title;
+      itemTd.appendChild(title);
+      const subText = [group, row.payee].filter(Boolean).join(' · ');
+      if (subText) {
+        const sub = document.createElement('span');
+        sub.className = 'sub';
+        sub.textContent = subText;
+        itemTd.appendChild(sub);
+      }
+      tr.appendChild(itemTd);
+      tr.appendChild(td('Terms', termsText(row), 'terms'));
+      tr.appendChild(td('Last 7 days', row.active ? money(row.window_setaside) : '—', 'amount'));
+
+      const activeTd = td('Active', '', 'active-cell');
+      const pill = document.createElement('span');
+      pill.className = 'pill ' + (row.active ? 'on' : 'off');
+      pill.textContent = row.active ? 'Active' : 'Inactive';
+      activeTd.appendChild(pill);
+      tr.appendChild(activeTd);
+
+      tr.appendChild(actionsCell(row));
+      bodyEl.appendChild(tr);
+
+      if (index === obligations.length - 1) bodyEl.appendChild(subtotalRow(group, groupTotal));
+    });
+
+    $('grand-total-amt').textContent = money(grandTotal);
+    $('grand-total').style.display = 'flex';
+    const note = $('grand-total-note');
+    note.textContent = 'Dollars set aside over the last 7 days, using the same math as the Saturday email. Inactive items are excluded.';
+    note.style.display = 'block';
+  }
+
+  function subtotalRow(group, total) {
+    const tr = document.createElement('tr');
+    tr.className = 'location-subtotal';
+    const labelTd = document.createElement('td');
+    labelTd.colSpan = 2;
+    labelTd.dataset.label = '';
+    labelTd.textContent = group + ' — subtotal (active only)';
+    const amtTd = document.createElement('td');
+    amtTd.className = 'amount';
+    amtTd.dataset.label = '';
+    amtTd.textContent = money(total);
+    tr.appendChild(labelTd);
+    tr.appendChild(amtTd);
+    tr.appendChild(document.createElement('td'));
+    tr.appendChild(document.createElement('td'));
+    return tr;
+  }
+
+  function button(cls, text, onclick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = text;
+    b.onclick = onclick;
+    return b;
+  }
+
+  function actionsCell(row) {
+    const cell = document.createElement('td');
+    cell.className = 'actions';
+    cell.appendChild(button('btn-quiet', 'Edit', () => openForm(row)));
+    cell.appendChild(button('btn-quiet', row.active ? 'Deactivate' : 'Activate', () => toggleActive(row)));
+    cell.appendChild(button('btn-danger', 'Delete', () => deleteObligation(row)));
+    return cell;
+  }
+
+  function payloadFromRow(row, overrides) {
+    return Object.assign({
+      location: row.location || null,
+      title: row.title,
+      description: row.description || null,
+      payee: row.payee || null,
+      kind: row.kind,
+      amount: row.amount === undefined ? null : row.amount,
+      per: row.per || null,
+      rate: row.rate === undefined ? null : row.rate,
+      basis: row.basis || 'gross',
+      min_monthly: row.min_monthly === undefined ? null : row.min_monthly,
+      max_monthly: row.max_monthly === undefined ? null : row.max_monthly,
+      device_count: row.device_count || 1,
+      active: row.active
+    }, overrides || {});
+  }
+
+  async function toggleActive(row) {
+    const next = !row.active;
+    setStatus(next ? 'Activating…' : 'Deactivating…');
+    try {
+      await writeObligation(Object.assign({ operation: 'update', id: row.id }, payloadFromRow(row, { active: next })));
+      await loadObligations();
+      setStatus(next ? 'Activated.' : 'Deactivated.');
+    } catch (err) {
+      setStatus('Could not update — ' + err.message, true);
+    }
+  }
+
+  async function deleteObligation(row) {
+    const label = row.title + ' (' + groupLabel(row) + ')';
+    if (!confirm('Delete ' + label + '? This can\'t be undone. To keep the history, use Deactivate instead.')) return;
+    setStatus('Deleting…');
+    try {
+      await writeObligation({ operation: 'delete', id: row.id });
+      if (editingId === row.id) closeForm();
+      await loadObligations();
+      setStatus('Deleted.');
+    } catch (err) {
+      setStatus('Could not delete — ' + err.message, true);
+    }
+  }
+
+  // ---- Add / edit form ----
+  function syncKind() {
+    const isFixed = $('f-kind').value === 'fixed';
+    form.querySelectorAll('.fixed-field').forEach(el => el.classList.toggle('hidden', !isFixed));
+    form.querySelectorAll('.variable-field').forEach(el => el.classList.toggle('hidden', isFixed));
+  }
+
+  function fillLocationSelect(selected) {
+    const sel = $('f-location');
+    sel.innerHTML = '';
+    const biz = document.createElement('option');
+    biz.value = '';
+    biz.textContent = 'Business-wide';
+    sel.appendChild(biz);
+    const known = new Set();
+    for (const l of LOCATIONS) {
+      known.add(l.location);
+      const o = document.createElement('option');
+      o.value = l.location;
+      o.textContent = l.display_name || l.location;
+      sel.appendChild(o);
+    }
+    if (selected && !known.has(selected)) {
+      const o = document.createElement('option');
+      o.value = selected;
+      o.textContent = selected;
+      sel.appendChild(o);
+    }
+    sel.value = selected || '';
+  }
+
+  function openForm(row) {
+    editingId = row ? row.id : null;
+    form.reset();
+    fillLocationSelect(row ? row.location : '');
+    $('form-title').textContent = row ? 'Edit obligation' : 'Add obligation';
+    if (row) {
+      $('f-title').value = row.title || '';
+      $('f-payee').value = row.payee || '';
+      $('f-description').value = row.description || '';
+      $('f-kind').value = row.kind;
+      $('f-amount').value = row.amount === null || row.amount === undefined ? '' : row.amount;
+      $('f-per').value = row.per || 'month';
+      $('f-rate').value = row.rate === null || row.rate === undefined ? '' : parseFloat((Number(row.rate) * 100).toFixed(4));
+      $('f-basis').value = row.basis || 'gross';
+      $('f-devices').value = row.device_count || 1;
+      $('f-min').value = row.min_monthly === null || row.min_monthly === undefined ? '' : row.min_monthly;
+      $('f-max').value = row.max_monthly === null || row.max_monthly === undefined ? '' : row.max_monthly;
+      $('f-active').checked = !!row.active;
+    }
+    syncKind();
+    form.classList.add('open');
+    render();
+    form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    $('f-title').focus();
+  }
+
+  function closeForm() {
+    editingId = null;
+    form.classList.remove('open');
+    form.reset();
+    render();
+  }
+
+  function numOrNull(id) {
+    const v = $(id).value.trim();
+    return v === '' ? null : Number(v);
+  }
+
+  function buildPayload() {
+    const kind = $('f-kind').value;
+    const title = $('f-title').value.trim();
+    if (!title) throw new Error('Title is required.');
+    const base = {
+      location: $('f-location').value || null,
+      title,
+      description: $('f-description').value.trim() || null,
+      payee: $('f-payee').value.trim() || null,
+      kind,
+      active: $('f-active').checked
+    };
+    if (kind === 'fixed') {
+      const amount = numOrNull('f-amount');
+      if (amount === null || !(amount >= 0)) throw new Error('Enter the fixed amount.');
+      return Object.assign(base, {
+        amount, per: $('f-per').value,
+        rate: null, basis: 'gross', min_monthly: null, max_monthly: null, device_count: 1
+      });
+    }
+    const ratePct = numOrNull('f-rate');
+    if (ratePct === null || !(ratePct >= 0)) throw new Error('Enter the rate as a percent.');
+    if (!base.location) throw new Error('Variable obligations need a location (they are a share of that location\'s sales).');
+    const min = numOrNull('f-min');
+    const max = numOrNull('f-max');
+    if (min !== null && max !== null && min > max) throw new Error('Minimum can\'t be higher than the maximum.');
+    const devices = parseInt($('f-devices').value, 10);
+    if (!(devices >= 1)) throw new Error('Devices must be at least 1.');
+    return Object.assign(base, {
+      amount: null, per: null,
+      rate: Number((ratePct / 100).toFixed(6)),
+      basis: $('f-basis').value, min_monthly: min, max_monthly: max, device_count: devices
+    });
+  }
+
+  $('toggle-add').onclick = () => openForm(null);
+  $('cancel-form').onclick = closeForm;
+  $('f-kind').addEventListener('change', syncKind);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    let payload;
+    try {
+      payload = buildPayload();
+    } catch (err) {
+      setStatus(err.message, true);
+      return;
+    }
+    const isEdit = editingId !== null;
+    if (isEdit) { payload.operation = 'update'; payload.id = editingId; } else { payload.operation = 'create'; }
+    setStatus('Saving…');
+    try {
+      await writeObligation(payload);
+      closeForm();
+      await loadObligations();
+      setStatus(isEdit ? 'Saved.' : 'Added.');
+    } catch (err) {
+      setStatus('Could not save — ' + err.message, true);
+    }
+  });
+
+  async function loadLocations() {
+    const res = await fetch(LOCATIONS_API_BASE, { method: 'GET', headers: { 'X-API-Key': API_KEY } });
+    if (!res.ok) throw new Error(await readError(res));
+    const data = await res.json();
+    LOCATIONS = (Array.isArray(data) ? data : []).filter(l => l && l.location);
+    fillLocationSelect('');
+  }
+
+  syncKind();
+  loadLocations()
+    .then(loadObligations)
+    .catch(err => setStatus('Could not load locations — ' + err.message, true));
+</script>
+</body>
+</html>
