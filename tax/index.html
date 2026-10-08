@@ -54,6 +54,19 @@
     font-size: 0.9rem;
   }
 
+  .back-link {
+    display: inline-block;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--ledger-green); text-decoration: underline; }
+  .back-link:focus-visible {
+    outline: 2px solid var(--ledger-green);
+    outline-offset: 2px;
+  }
+
   .panel {
     background: #fff;
     border: 1px solid var(--rule);
@@ -240,6 +253,7 @@
 </head>
 <body>
 <main>
+  <a class="back-link" href="/">&larr; Operator Tools</a>
   <header>
     <h1>Tax Obligations</h1>
   </header>
